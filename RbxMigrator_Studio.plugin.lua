@@ -1890,7 +1890,7 @@ local function applyMapping(root: Instance, assetType: string, mapping: Mapping)
 	pcall(function() ChangeHistoryService:SetWaypoint("Before Tower Asset Migration - " .. assetType) end)
 	local objects = instancesIncludingRoot(root)
 	local safeNativeIds: {[string]: boolean} = {}
-	local resolvedReferences, resolvedScriptSources = scanAllReferences(root, objects)
+	local resolvedReferences = scanAllReferences(root, objects)
 	for _, item in ipairs(resolvedReferences) do
 		if item.assetType == assetType and item.supported then
 			safeNativeIds[item.assetId] = true
@@ -1921,7 +1921,7 @@ local function applyMapping(root: Instance, assetType: string, mapping: Mapping)
 		end
 	end
 	for object, references in pairs(byScript) do
-		local original = resolvedScriptSources[object] or readScriptSource(object)
+		local original = readScriptSource(object)
 		if not original then continue end
 		table.sort(references, function(a, b)
 			return (a.valueStart or 0) > (b.valueStart or 0)
