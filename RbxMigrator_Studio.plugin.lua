@@ -1151,23 +1151,28 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 		end
 		scriptSources[object] = source
 
-		-- Resolve names once per script instead of rebuilding the ancestry path
-		-- for every asset reference found inside the same source.
-		local fullName = object:GetFullName()
-		local objectRelativePath = relativePath(root, object)
+		-- Resolve the path lazily: scripts without references need no ancestry walk.
+		local fullName: string? = nil
+		local objectRelativePath: string? = nil
 
 		-- Line lookup used to scan source[1..offset] for every hit (O(source
-		-- length × reference count)). Index newline positions once, then binary
-		-- search them for each reference.
-		local newlinePositions = {}
-		for position in source:gmatch("()\n") do
-			table.insert(newlinePositions, position)
-		end
+		-- length × reference count)). Build the newline index only for scripts
+		-- that actually contain a reference, then binary-search it per hit.
+		local newlinePositions: {number}? = nil
 		local function lineAt(position: number): number
-			local low, high, count = 1, #newlinePositions, 0
+			if not newlinePositions then
+				local positions = {}
+				for newlinePosition in source:gmatch("()\n") do
+					table.insert(positions, newlinePosition)
+				end
+				newlinePositions = positions
+			end
+
+			local positions = newlinePositions :: {number}
+			local low, high, count = 1, #positions, 0
 			while low <= high do
 				local middle = math.floor((low + high) / 2)
-				if newlinePositions[middle] < position then
+				if positions[middle] < position then
 					count = middle
 					low = middle + 1
 				else
@@ -1227,6 +1232,10 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 			if id == "0" or #id < 5 or #id > 20 or occupied[valueStart] then return end
 			occupied[valueStart] = true
 			local line = lineAt(valueStart)
+			if not fullName then
+				fullName = object:GetFullName()
+				objectRelativePath = relativePath(root, object)
+			end
 			local assetType = inferredType or inferScriptAssetType(fieldName, false)
 			if assetType == "Unknown" then assetType = typeAt(valueStart) end
 			local contextual = false
@@ -1237,8 +1246,8 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 			local supported = assetType == "Animation" or assetType == "Audio" or assetType == "Mesh"
 			table.insert(results, {
 				name = object.Name .. " â¢ " .. fieldName,
-				path = fullName .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
-				relativePath = objectRelativePath .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
+				path = (fullName :: string) .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
+				relativePath = (objectRelativePath :: string) .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
 				assetId = id, assetType = assetType, referenceKind = "Script",
 				modulePath = object:GetFullName(), fieldPath = fieldName,
 				valueStart = valueStart, valueEnd = valueEnd, supported = supported,
