@@ -877,6 +877,20 @@ local function instancesIncludingRoot(root: Instance): {Instance}
 	return result
 end
 
+-- Heavy scans yield in small batches so Studio can keep rendering and
+-- responding to input. A selection-driven preview may supply a generation;
+-- changing selection invalidates that scan immediately at the next yield.
+local selectionScanGeneration = 0
+local SCAN_CANCELLED = "__RBXMIGRATOR_SCAN_CANCELLED__"
+
+local function cooperativeScanYield(index: number, interval: number, expectedGeneration: number?)
+	if index % interval ~= 0 then return end
+	task.wait()
+	if expectedGeneration and expectedGeneration ~= selectionScanGeneration then
+		error(SCAN_CANCELLED, 0)
+	end
+end
+
 -- Scan native instance Content properties without changing them. Only the
 -- Animation/Audio/Mesh entries can be uploaded by RbxMigrator. Image/Video are
 -- surfaced in dry-run reports but deliberately NOT added to migration jobs.
@@ -929,9 +943,10 @@ local function normalizedAssetId(value: any): string?
 	return id
 end
 
-local function scanInstanceProperties(root: Instance, objects: {Instance}?): {AssetManifestEntry}
+local function scanInstanceProperties(root: Instance, objects: {Instance}?, expectedGeneration: number?): {AssetManifestEntry}
 	local results: {AssetManifestEntry} = {}
-	for _, object in ipairs(objects or instancesIncludingRoot(root)) do
+	for index, object in ipairs(objects or instancesIncludingRoot(root)) do
+		cooperativeScanYield(index, 64, expectedGeneration)
 		for _, descriptor in ipairs(PROPERTY_REGISTRY_BY_CLASS[object.ClassName] or EMPTY_PROPERTY_DESCRIPTORS) do
 			local ok, value = pcall(function()
 				return (object :: any)[descriptor.property]
@@ -1036,7 +1051,7 @@ local function writeScriptSource(object: Instance, newSource: string): (boolean,
 	return worked, if worked then nil else tostring(otherReason or reason)
 end
 
-local function maskLuaComments(source: string): string
+local function maskLuaComments(source: string, expectedGeneration: number?): string
 	-- Copy ordinary source in spans. The previous character-at-a-time table
 	-- builder created one table entry per byte for large ModuleScripts.
 	local parts = {}
@@ -1045,6 +1060,7 @@ local function maskLuaComments(source: string): string
 	local n = #source
 
 	while i <= n do
+		cooperativeScanYield(i, 16384, expectedGeneration)
 		local char = source:sub(i, i)
 		local nextChar = source:sub(i + 1, i + 1)
 
@@ -1091,7 +1107,7 @@ end
 
 -- Numeric assignments in quoted strings are documentation, not code.
 -- Keep the character positions unchanged so exact replacements stay safe.
-local function maskQuotedStrings(source: string): string
+local function maskQuotedStrings(source: string, expectedGeneration: number?): string
 	-- Preserve byte positions while replacing whole quoted spans at once.
 	local parts = {}
 	local copyStart = 1
@@ -1099,6 +1115,7 @@ local function maskQuotedStrings(source: string): string
 	local n = #source
 
 	while i <= n do
+		cooperativeScanYield(i, 16384, expectedGeneration)
 		local quote = source:sub(i, i)
 		if quote == "'" or quote == '"' then
 			local begin = i
@@ -1172,12 +1189,13 @@ local function isAnimationActionKey(fieldName: string): boolean
 		or lower:match('^run%d+$') ~= nil
 end
 
-local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({AssetManifestEntry}, {[Instance]: string}, number)
+local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?, expectedGeneration: number?): ({AssetManifestEntry}, {[Instance]: string}, number)
 	local results: {AssetManifestEntry} = {}
 	local scriptSources: {[Instance]: string} = {}
 	local unreadableScripts = 0
 
-	for _, object in ipairs(objects or instancesIncludingRoot(root)) do
+	for objectIndex, object in ipairs(objects or instancesIncludingRoot(root)) do
+		cooperativeScanYield(objectIndex, 32, expectedGeneration)
 		if not object:IsA("LuaSourceContainer") then continue end
 		local source = readScriptSource(object)
 		if not source then
@@ -1217,8 +1235,8 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 			return count + 1
 		end
 
-		local clean = maskLuaComments(source)
-		local numericClean = maskQuotedStrings(clean)
+		local clean = maskLuaComments(source, expectedGeneration)
+		local numericClean = maskQuotedStrings(clean, expectedGeneration)
 		-- A common decompiled Animator script holds tables such as
 		-- { Idle = 123, Walk = 456 } without using the word Animation in
 		-- its table name. We only recognize action keys when the script is
@@ -1256,6 +1274,7 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 			return found
 		end
 		local occupied = {}
+		local referenceCount = 0
 		local function addRef(
 			fieldName: string,
 			id: string,
@@ -1266,6 +1285,8 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 		)
 			if id == "0" or #id < 5 or #id > 20 or occupied[valueStart] then return end
 			occupied[valueStart] = true
+			referenceCount += 1
+			cooperativeScanYield(referenceCount, 128, expectedGeneration)
 			local line = lineAt(valueStart)
 			if not fullName then
 				fullName = object:GetFullName()
@@ -1372,23 +1393,25 @@ end
 -- consider native instance properties too; an ID can appear once as a real
 -- Animation.AnimationId and elsewhere as a generic AssetURI.
 -- Conversely, the same ID tagged Audio and Animation is NOT safe to guess.
-local function scanAllReferences(root: Instance, objects: {Instance}?): ({AssetManifestEntry}, {[Instance]: string}, number)
+local function scanAllReferences(root: Instance, objects: {Instance}?, expectedGeneration: number?): ({AssetManifestEntry}, {[Instance]: string}, number)
 	local objectList = objects or instancesIncludingRoot(root)
-	local entries = scanInstanceProperties(root, objectList)
-	local scriptEntries, scriptSources, unreadableScripts = scanScriptReferencesRaw(root, objectList)
+	local entries = scanInstanceProperties(root, objectList, expectedGeneration)
+	local scriptEntries, scriptSources, unreadableScripts = scanScriptReferencesRaw(root, objectList, expectedGeneration)
 	for _, item in ipairs(scriptEntries) do
 		table.insert(entries, item)
 	end
 
 	local evidence: {[string]: {[string]: boolean}} = {}
-	for _, item in ipairs(entries) do
+	for index, item in ipairs(entries) do
+		cooperativeScanYield(index, 512, expectedGeneration)
 		if item.assetType ~= "Unknown" then
 			if not evidence[item.assetId] then evidence[item.assetId] = {} end
 			evidence[item.assetId][item.assetType] = true
 		end
 	end
 
-	for _, item in ipairs(entries) do
+	for index, item in ipairs(entries) do
+		cooperativeScanYield(index, 512, expectedGeneration)
 		local kinds = evidence[item.assetId]
 		if not kinds then continue end
 		local list = {}
@@ -1465,37 +1488,17 @@ local function cachedCount(assetType: string, ids: {[string]: boolean}): number
 end
 
 local function updateSelectionPreview()
+	-- Selection changes must stay cheap. Detailed inventory is now explicit
+	-- (Preview / Dry Run), never performed synchronously on a folder click.
 	local root = currentSelection()
 	if not root then
 		selectionLabel.Text = "Selection: select exactly one folder/model/asset."
 		return
 	end
-	local references = scanAllReferences(root, instancesIncludingRoot(root))
-	local counts: {[string]: number} = {}
-	local ids: {[string]: {[string]: boolean}} = {}
-	for _, entry in ipairs(references) do
-		if not entry.supported then continue end
-		counts[entry.assetType] = (counts[entry.assetType] or 0) + 1
-		if not ids[entry.assetType] then ids[entry.assetType] = {} end
-		ids[entry.assetType][entry.assetId] = true
-	end
-	local animationIds = ids.Animation or {}
-	local audioIds = ids.Audio or {}
-	local meshIds = ids.Mesh or {}
+
 	selectionLabel.Text = (
-		"Selection: %s\nAnims: %d/%d (%d cached)  â¢  Sounds: %d/%d (%d cached)  â¢  Meshes: %d/%d (%d cached)"
-	):format(
-		root:GetFullName(),
-		counts.Animation or 0,
-		countDictionary(animationIds),
-		cachedCount("Animation", animationIds),
-		counts.Audio or 0,
-		countDictionary(audioIds),
-		cachedCount("Audio", audioIds),
-		counts.Mesh or 0,
-		countDictionary(meshIds),
-		cachedCount("Mesh", meshIds)
-	)
+		"Selection: %s\nAsset inventory has not been scanned. Click Preview / Dry Run to inspect it."
+	):format(root:GetFullName())
 end
 
 ----------------------------------------------------------------
@@ -1509,7 +1512,8 @@ local function previewFingerprint(
 	root: Instance,
 	objects: {Instance}?,
 	preScannedEntries: {AssetManifestEntry}?,
-	preScannedSources: {[Instance]: string}?
+	preScannedSources: {[Instance]: string}?,
+	expectedGeneration: number?
 ): string
 	-- Compact digest of selected scripts + scanned references and settings.
 	-- Recomputed before migration: stale previews are never auto-approved.
@@ -1517,16 +1521,19 @@ local function previewFingerprint(
 	local entries = preScannedEntries
 	local scriptSources = preScannedSources
 	if not entries or not scriptSources then
-		local scannedEntries, scannedSources = scanAllReferences(root, objectList)
+		local scannedEntries, scannedSources = scanAllReferences(root, objectList, expectedGeneration)
 		entries = entries or scannedEntries
 		scriptSources = scriptSources or scannedSources
 	end
 	local fingerprintEntries: {AssetManifestEntry} = entries or {}
 	local fingerprintSources: {[Instance]: string} = scriptSources or {}
 	local hash = 5381
+	local hashedBytes = 0
 	local function append(text: string)
 		for i = 1, #text do
 			hash = (hash * 33 + string.byte(text, i)) % 4294967296
+			hashedBytes += 1
+			cooperativeScanYield(hashedBytes, 32768, expectedGeneration)
 		end
 	end
 	append(tostring(forceReupload))
@@ -1560,8 +1567,27 @@ local function previewSelected(): boolean
 		setStatus("Select one item", "Choose exactly one folder, model, instance, or script.", true)
 		return false
 	end
+	local generation = selectionScanGeneration
 	local objects = instancesIncludingRoot(root)
-	local allEntries, scriptSources, unreadableScripts = scanAllReferences(root, objects)
+	setStatus("Scanning selection", "Building asset inventory in batches. You can still interact with Studio.")
+
+	local scanOk, allEntries, scriptSources, unreadableScripts, signature = pcall(function()
+		local entries, sources, unreadable = scanAllReferences(root, objects, generation)
+		local fingerprint = previewFingerprint(root, objects, entries, sources, generation)
+		return entries, sources, unreadable, fingerprint
+	end)
+
+	if not scanOk then
+		if allEntries == SCAN_CANCELLED then
+			return false
+		end
+		setStatus("Preview scan failed", tostring(allEntries), true)
+		return false
+	end
+
+	if generation ~= selectionScanGeneration or currentSelection() ~= root then
+		return false
+	end
 	local byType: {[string]: {[string]: boolean}} = {}
 	local supportedSelected: {[string]: {[string]: boolean}} = {}
 	local cachedByType: {[string]: {[string]: boolean}} = {}
@@ -1650,7 +1676,7 @@ local function previewSelected(): boolean
 	table.insert(lines, "If the plan looks right, click Migrate Selected to proceed.")
 	setReport(table.concat(lines, "\n"))
 	previewRoot = root
-	previewSignature = previewFingerprint(root, objects, allEntries, scriptSources)
+	previewSignature = signature
 	setStatus("Dry run ready â nothing changed",
 		("%d references found â¢ %d uploads planned â¢ %d cached â¢ %d scan-only/uncertain. Review the report before migrating."):format(
 			#allEntries, uniqueToUpload, uniqueCached, unsupportedReferences))
@@ -2828,8 +2854,15 @@ printReportButton.MouseButton1Click:Connect(function()
 	print(reportBox.Text)
 end)
 
-refreshSelectionButton.MouseButton1Click:Connect(updateSelectionPreview)
-Selection.SelectionChanged:Connect(updateSelectionPreview)
+refreshSelectionButton.MouseButton1Click:Connect(function()
+	previewSelected()
+end)
+Selection.SelectionChanged:Connect(function()
+	selectionScanGeneration += 1
+	previewRoot = nil
+	previewSignature = nil
+	updateSelectionPreview()
+end)
 
 ----------------------------------------------------------------
 -- Initial state
