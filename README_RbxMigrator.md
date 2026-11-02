@@ -37,7 +37,7 @@ Abre `RbxMigrator_Studio.plugin.lua` en Studio como código fuente de un complem
 
 ## Rendimiento del análisis del complemento de Studio
 
-El complemento reutiliza una sola instantánea de descendientes durante cada inventario, conserva las lecturas del código fuente de los scripts dentro de ese análisis e indexa las posiciones de salto de línea una sola vez por script que contiene referencias de recursos. La validación de la vista previa y la aplicación de correspondencias de caché también reutilizan los resultados del análisis, en vez de reconstruir el inventario para cada tipo de recurso habilitado. Esto reduce recorridos redundantes del árbol y búsquedas repetidas desde el inicio del código; la mejora real depende del modelo seleccionado y del entorno de Studio.
+El complemento mantiene ligera la selección de carpetas: al cambiar la selección solo actualiza la ruta seleccionada e invalida la vista previa anterior. No analiza la carpeta automáticamente. El comando explícito Preview / Dry Run realiza el inventario por lotes cooperativos y cede tiempo a Studio entre grupos de instancias y durante el análisis de scripts grandes. Si la selección cambia mientras se ejecuta la vista previa, ese análisis se cancela. El analizador también reutiliza una sola instantánea de descendientes, conserva las lecturas del código fuente durante cada análisis, indexa una sola vez las posiciones de salto de línea por script y reutiliza los resultados en la validación y aplicación de la caché. Esto reduce recorridos redundantes del árbol, búsquedas repetidas desde el inicio del código y bloqueos al seleccionar carpetas; la mejora real depende del modelo y del entorno de Studio.
 
 ## Reintentos automáticos de recursos fallidos
 
