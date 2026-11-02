@@ -25,7 +25,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-APP_TITLE = "RbxMigrator v3.35 — API-first + failed-asset retries"
+APP_TITLE = "RbxMigrator v3.36 — optimized Studio scans"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
