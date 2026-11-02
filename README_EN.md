@@ -1,6 +1,6 @@
-# RbxMigrator v3.35
+# RbxMigrator v3.36
 
-**RbxMigrator** is a Roblox asset migration tool. This v3.35 release uses the API-first downloader and adds bounded automatic retries for assets that fail during migration, with matching dashboard, launcher, and Studio plugin branding.
+**RbxMigrator** is a Roblox asset migration tool. This release keeps the API-first downloader and bounded failed-asset retries, and improves Studio plugin scan performance.
 
 ## Package contents
 
@@ -34,6 +34,10 @@ The helper binds to `127.0.0.1` only; it is not exposed to other devices on the 
 ## Roblox Studio plugin
 
 Open `RbxMigrator_Studio.plugin.lua` in Studio as a plugin source and install it using your normal local plugin workflow. The toolbar and widget display as **RbxMigrator**. Existing internal plugin IDs are intentionally retained so updating the plugin does not create duplicate toolbar buttons or widgets.
+
+## Studio plugin scan performance
+
+The Studio plugin reuses a single descendant snapshot during each inventory pass, caches script source reads within that pass, and indexes newline positions once per script that contains asset references. Dry-run validation and cache application also reuse scan results rather than rebuilding the same inventory separately for each enabled asset type. This reduces redundant tree walks and repeated source-prefix scans; actual gains depend on the selected model and Studio environment.
 
 ## Automatic retries for failed assets
 
