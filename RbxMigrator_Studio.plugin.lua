@@ -870,12 +870,10 @@ local function relativePath(
 end
 
 local function instancesIncludingRoot(root: Instance): {Instance}
-	local result = { root }
-
-	for _, object in ipairs(root:GetDescendants()) do
-		table.insert(result, object)
-	end
-
+	-- GetDescendants already allocates the array; prepend the root to that
+	-- array instead of copying every descendant into a second table.
+	local result = root:GetDescendants()
+	table.insert(result, 1, root)
 	return result
 end
 
@@ -917,9 +915,9 @@ local function normalizedAssetId(value: any): string?
 	return id
 end
 
-local function scanInstanceProperties(root: Instance): {AssetManifestEntry}
+local function scanInstanceProperties(root: Instance, objects: {Instance}?): {AssetManifestEntry}
 	local results: {AssetManifestEntry} = {}
-	for _, object in ipairs(instancesIncludingRoot(root)) do
+	for _, object in ipairs(objects or instancesIncludingRoot(root)) do
 		for _, descriptor in ipairs(PROPERTY_REGISTRY) do
 			if object.ClassName ~= descriptor.className then continue end
 			local ok, value = pcall(function()
@@ -1139,12 +1137,46 @@ local function isAnimationActionKey(fieldName: string): boolean
 		or lower:match('^run%d+$') ~= nil
 end
 
-local function scanScriptReferencesRaw(root: Instance): {AssetManifestEntry}
+local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({AssetManifestEntry}, {[Instance]: string}, number)
 	local results: {AssetManifestEntry} = {}
-	for _, object in ipairs(instancesIncludingRoot(root)) do
+	local scriptSources: {[Instance]: string} = {}
+	local unreadableScripts = 0
+
+	for _, object in ipairs(objects or instancesIncludingRoot(root)) do
 		if not object:IsA("LuaSourceContainer") then continue end
 		local source = readScriptSource(object)
-		if not source then continue end
+		if not source then
+			unreadableScripts += 1
+			continue
+		end
+		scriptSources[object] = source
+
+		-- Resolve names once per script instead of rebuilding the ancestry path
+		-- for every asset reference found inside the same source.
+		local fullName = object:GetFullName()
+		local objectRelativePath = relativePath(root, object)
+
+		-- Line lookup used to scan source[1..offset] for every hit (O(source
+		-- length × reference count)). Index newline positions once, then binary
+		-- search them for each reference.
+		local newlinePositions = {}
+		for position in source:gmatch("()\\n") do
+			table.insert(newlinePositions, position)
+		end
+		local function lineAt(position: number): number
+			local low, high, count = 1, #newlinePositions, 0
+			while low <= high do
+				local middle = math.floor((low + high) / 2)
+				if newlinePositions[middle] < position then
+					count = middle
+					low = middle + 1
+				else
+					high = middle - 1
+				end
+			end
+			return count + 1
+		end
+
 		local clean = maskLuaComments(source)
 		local numericClean = maskQuotedStrings(clean)
 		-- A common decompiled Animator script holds tables such as
@@ -1194,8 +1226,7 @@ local function scanScriptReferencesRaw(root: Instance): {AssetManifestEntry}
 		)
 			if id == "0" or #id < 5 or #id > 20 or occupied[valueStart] then return end
 			occupied[valueStart] = true
-			local line = 1
-			for _ in source:sub(1, valueStart - 1):gmatch("\n") do line += 1 end
+			local line = lineAt(valueStart)
 			local assetType = inferredType or inferScriptAssetType(fieldName, false)
 			if assetType == "Unknown" then assetType = typeAt(valueStart) end
 			local contextual = false
@@ -1206,8 +1237,8 @@ local function scanScriptReferencesRaw(root: Instance): {AssetManifestEntry}
 			local supported = assetType == "Animation" or assetType == "Audio" or assetType == "Mesh"
 			table.insert(results, {
 				name = object.Name .. " â¢ " .. fieldName,
-				path = object:GetFullName() .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
-				relativePath = relativePath(root, object) .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
+				path = fullName .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
+				relativePath = objectRelativePath .. " [" .. fieldName .. ":" .. tostring(line) .. "]",
 				assetId = id, assetType = assetType, referenceKind = "Script",
 				modulePath = object:GetFullName(), fieldPath = fieldName,
 				valueStart = valueStart, valueEnd = valueEnd, supported = supported,
@@ -1290,16 +1321,18 @@ local function scanScriptReferencesRaw(root: Instance): {AssetManifestEntry}
 			addRef(field, id, valueStart, numberEnd, "rbxassetid URI")
 		end
 	end
-	return results
+	return results, scriptSources, unreadableScripts
 end
 
 -- v3.27: Two-pass, selection-wide type resolution. It is crucial to
 -- consider native instance properties too; an ID can appear once as a real
 -- Animation.AnimationId and elsewhere as a generic AssetURI.
 -- Conversely, the same ID tagged Audio and Animation is NOT safe to guess.
-local function scanAllReferences(root: Instance): {AssetManifestEntry}
-	local entries = scanInstanceProperties(root)
-	for _, item in ipairs(scanScriptReferencesRaw(root)) do
+local function scanAllReferences(root: Instance, objects: {Instance}?): ({AssetManifestEntry}, {[Instance]: string}, number)
+	local objectList = objects or instancesIncludingRoot(root)
+	local entries = scanInstanceProperties(root, objectList)
+	local scriptEntries, scriptSources, unreadableScripts = scanScriptReferencesRaw(root, objectList)
+	for _, item in ipairs(scriptEntries) do
 		table.insert(entries, item)
 	end
 
@@ -1331,12 +1364,13 @@ local function scanAllReferences(root: Instance): {AssetManifestEntry}
 		end
 	end
 
-	return entries
+	return entries, scriptSources, unreadableScripts
 end
 
-local function makeManifest(root: Instance, assetType: string): Manifest
+local function makeManifest(root: Instance, assetType: string, preScannedEntries: {AssetManifestEntry}?): Manifest
 	local assets: {AssetManifestEntry} = {}
-	for _, entry in ipairs(scanAllReferences(root)) do
+	local entries = preScannedEntries or scanAllReferences(root)
+	for _, entry in ipairs(entries) do
 		if entry.assetType == assetType and entry.supported then
 			table.insert(assets, entry)
 		end
@@ -1392,7 +1426,7 @@ local function updateSelectionPreview()
 		selectionLabel.Text = "Selection: select exactly one folder/model/asset."
 		return
 	end
-	local references = scanAllReferences(root)
+	local references = scanAllReferences(root, instancesIncludingRoot(root))
 	local counts: {[string]: number} = {}
 	local ids: {[string]: {[string]: boolean}} = {}
 	for _, entry in ipairs(references) do
@@ -1427,9 +1461,22 @@ end
 local previewRoot: Instance? = nil
 local previewSignature: string? = nil
 
-local function previewFingerprint(root: Instance): string
+local function previewFingerprint(
+	root: Instance,
+	objects: {Instance}?,
+	preScannedEntries: {AssetManifestEntry}?,
+	preScannedSources: {[Instance]: string}?
+): string
 	-- Compact digest of selected scripts + scanned references and settings.
 	-- Recomputed before migration: stale previews are never auto-approved.
+	local objectList = objects or instancesIncludingRoot(root)
+	local entries = preScannedEntries
+	local scriptSources = preScannedSources
+	if not entries or not scriptSources then
+		local scannedEntries, scannedSources = scanAllReferences(root, objectList)
+		entries = entries or scannedEntries
+		scriptSources = scriptSources or scannedSources
+	end
 	local hash = 5381
 	local function append(text: string)
 		for i = 1, #text do
@@ -1444,13 +1491,13 @@ local function previewFingerprint(root: Instance): string
 	for _, assetType in ipairs(ASSET_TYPE_ORDER) do
 		append(assetType .. tostring(enabledAssetTypes[assetType]))
 	end
-	for _, entry in ipairs(scanInstanceProperties(root)) do
+	for _, entry in ipairs(entries) do
 		append(entry.path .. ":" .. entry.assetType .. ":" .. entry.assetId)
 	end
-	for _, object in ipairs(instancesIncludingRoot(root)) do
+	for _, object in ipairs(objectList) do
 		if object:IsA("LuaSourceContainer") then
 			append(object:GetFullName())
-			append(readScriptSource(object) or "[Source inaccessible]")
+			append(scriptSources[object] or "[Source inaccessible]")
 		end
 	end
 	return tostring(hash)
@@ -1467,13 +1514,8 @@ local function previewSelected(): boolean
 		setStatus("Select one item", "Choose exactly one folder, model, instance, or script.", true)
 		return false
 	end
-	local unreadableScripts = 0
-	for _, object in ipairs(instancesIncludingRoot(root)) do
-		if object:IsA("LuaSourceContainer") and readScriptSource(object) == nil then
-			unreadableScripts += 1
-		end
-	end
-	local allEntries = scanAllReferences(root)
+	local objects = instancesIncludingRoot(root)
+	local allEntries, scriptSources, unreadableScripts = scanAllReferences(root, objects)
 	local byType: {[string]: {[string]: boolean}} = {}
 	local supportedSelected: {[string]: {[string]: boolean}} = {}
 	local cachedByType: {[string]: {[string]: boolean}} = {}
@@ -1562,7 +1604,7 @@ local function previewSelected(): boolean
 	table.insert(lines, "If the plan looks right, click Migrate Selected to proceed.")
 	setReport(table.concat(lines, "\n"))
 	previewRoot = root
-	previewSignature = previewFingerprint(root)
+	previewSignature = previewFingerprint(root, objects, allEntries, scriptSources)
 	setStatus("Dry run ready â nothing changed",
 		("%d references found â¢ %d uploads planned â¢ %d cached â¢ %d scan-only/uncertain. Review the report before migrating."):format(
 			#allEntries, uniqueToUpload, uniqueCached, unsupportedReferences))
@@ -1800,14 +1842,15 @@ local function applyMapping(root: Instance, assetType: string, mapping: Mapping)
 		replaced += 1
 	end
 	pcall(function() ChangeHistoryService:SetWaypoint("Before Tower Asset Migration - " .. assetType) end)
+	local objects = instancesIncludingRoot(root)
 	local safeNativeIds: {[string]: boolean} = {}
-	local resolvedReferences = scanAllReferences(root)
+	local resolvedReferences = scanAllReferences(root, objects)
 	for _, item in ipairs(resolvedReferences) do
 		if item.assetType == assetType and item.supported then
 			safeNativeIds[item.assetId] = true
 		end
 	end
-	for _, object in ipairs(instancesIncludingRoot(root)) do
+	for _, object in ipairs(objects) do
 		local oldId = readAssetId(object, assetType)
 		local newId = if oldId and safeNativeIds[oldId] then mapping[oldId] else nil
 		if newId and newId ~= oldId then
@@ -1818,7 +1861,7 @@ local function applyMapping(root: Instance, assetType: string, mapping: Mapping)
 	end
 	local byScript: {[Instance]: {AssetManifestEntry}} = {}
 	local scriptsByPath: {[string]: Instance} = {}
-	for _, object in ipairs(instancesIncludingRoot(root)) do
+	for _, object in ipairs(objects) do
 		if object:IsA("LuaSourceContainer") then scriptsByPath[object:GetFullName()] = object end
 	end
 	for _, reference in ipairs(resolvedReferences) do
@@ -1982,9 +2025,10 @@ local function migrateAssetType(
 	assetType: string,
 	progressStart: number,
 	progressSpan: number,
-	retryAttempt: number?
+	retryAttempt: number?,
+	preScannedEntries: {AssetManifestEntry}?
 ): (string, number, number, number)
-	local manifest = makeManifest(root, assetType)
+	local manifest = makeManifest(root, assetType, preScannedEntries)
 	local label = ASSET_TYPE_LABELS[assetType] or assetType
 
 	if #manifest.assets == 0 then
@@ -2334,7 +2378,9 @@ local function migrateSelected()
 
 	-- Mandatory explicit preview: Migration cannot begin using an outdated
 	-- selection, checkbox set, cache setting, or script/property inventory.
-	local fingerprint = previewFingerprint(root)
+	local scanObjects = instancesIncludingRoot(root)
+	local scanEntries, scanSources = scanAllReferences(root, scanObjects)
+	local fingerprint = previewFingerprint(root, scanObjects, scanEntries, scanSources)
 	if previewRoot ~= root or previewSignature ~= fingerprint then
 		previewSelected()
 		setStatus("Review dry run before migrating", "Preview updated. Read the plan, then click Migrate Selected again to confirm.")
@@ -2359,10 +2405,13 @@ local function migrateSelected()
 		return
 	end
 
-	local anyAssets = false
-
+	local enabledTypes: {[string]: boolean} = {}
 	for _, assetType in ipairs(selectedTypes) do
-		if #makeManifest(root, assetType).assets > 0 then
+		enabledTypes[assetType] = true
+	end
+	local anyAssets = false
+	for _, entry in ipairs(scanEntries) do
+		if entry.supported and enabledTypes[entry.assetType] then
 			anyAssets = true
 			break
 		end
@@ -2396,7 +2445,9 @@ local function migrateSelected()
 					root,
 					assetType,
 					progressStart,
-					span
+					span,
+					nil,
+					if index == 1 then scanEntries else nil
 				)
 
 				local attemptReports = { report }
