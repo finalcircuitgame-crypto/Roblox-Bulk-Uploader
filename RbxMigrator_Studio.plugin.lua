@@ -873,7 +873,7 @@ local function instancesIncludingRoot(root: Instance): {Instance}
 	-- GetDescendants already allocates the array; prepend the root to that
 	-- array instead of copying every descendant into a second table.
 	local result = root:GetDescendants()
-	table.insert(result, 1, root)
+	table.insert(result, root)
 	return result
 end
 
@@ -916,6 +916,8 @@ for _, descriptor in ipairs(PROPERTY_REGISTRY) do
 	table.insert(descriptors, descriptor)
 end
 
+local EMPTY_PROPERTY_DESCRIPTORS: typeof(PROPERTY_REGISTRY) = {}
+
 local function normalizedAssetId(value: any): string?
 	local text = tostring(value or "")
 	local id = text:match("^%s*rbxassetid://(%d+)%s*$")
@@ -930,7 +932,7 @@ end
 local function scanInstanceProperties(root: Instance, objects: {Instance}?): {AssetManifestEntry}
 	local results: {AssetManifestEntry} = {}
 	for _, object in ipairs(objects or instancesIncludingRoot(root)) do
-		for _, descriptor in ipairs(PROPERTY_REGISTRY_BY_CLASS[object.ClassName] or {}) do
+		for _, descriptor in ipairs(PROPERTY_REGISTRY_BY_CLASS[object.ClassName] or EMPTY_PROPERTY_DESCRIPTORS) do
 			local ok, value = pcall(function()
 				return (object :: any)[descriptor.property]
 			end)
