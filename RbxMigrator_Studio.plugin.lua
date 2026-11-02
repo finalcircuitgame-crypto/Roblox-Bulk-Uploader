@@ -870,8 +870,8 @@ local function relativePath(
 end
 
 local function instancesIncludingRoot(root: Instance): {Instance}
-	-- GetDescendants already allocates the array; prepend the root to that
-	-- array instead of copying every descendant into a second table.
+	-- GetDescendants already allocates the array; append the root instead
+	-- of copying every descendant into a second table.
 	local result = root:GetDescendants()
 	table.insert(result, root)
 	return result
