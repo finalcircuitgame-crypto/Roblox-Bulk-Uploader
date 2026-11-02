@@ -37,7 +37,7 @@ Open `RbxMigrator_Studio.plugin.lua` in Studio as a plugin source and install it
 
 ## Studio plugin scan performance
 
-The Studio plugin reuses a single descendant snapshot during each inventory pass, caches script source reads within that pass, and indexes newline positions once per script that contains asset references. Dry-run validation and cache application also reuse scan results rather than rebuilding the same inventory separately for each enabled asset type. This reduces redundant tree walks and repeated source-prefix scans; actual gains depend on the selected model and Studio environment.
+The Studio plugin keeps folder selection lightweight: changing the selection only updates the selected path and invalidates an old preview. It does not scan the folder automatically. The explicit Preview / Dry Run command performs the inventory in cooperative batches, yielding to Studio between groups of instances and during large source scans. If the selection changes while a preview is running, that preview is cancelled. The scanner also reuses a single descendant snapshot, caches script source reads within each pass, indexes newline positions once per script, and reuses inventory results for dry-run validation and cache application. This reduces redundant tree walks, repeated source-prefix scans, and selection-click stalls; actual gains depend on the selected model and Studio environment.
 
 ## Automatic retries for failed assets
 
