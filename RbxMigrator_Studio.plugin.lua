@@ -2450,9 +2450,26 @@ local function migrateSelected()
 
 	-- Mandatory explicit preview: Migration cannot begin using an outdated
 	-- selection, checkbox set, cache setting, or script/property inventory.
+	local generation = selectionScanGeneration
 	local scanObjects = instancesIncludingRoot(root)
-	local scanEntries, scanSources = scanAllReferences(root, scanObjects)
-	local fingerprint = previewFingerprint(root, scanObjects, scanEntries, scanSources)
+	setStatus("Validating preview", "Checking the selected folder in cooperative batches.")
+	local scanOk, scanEntries, scanSources, fingerprint = pcall(function()
+		local entries, sources = scanAllReferences(root, scanObjects, generation)
+		local signature = previewFingerprint(root, scanObjects, entries, sources, generation)
+		return entries, sources, signature
+	end)
+	if not scanOk then
+		if scanEntries == SCAN_CANCELLED then
+			setStatus("Selection changed", "Migration was cancelled because the selected folder changed.")
+			return
+		end
+		setStatus("Validation failed", tostring(scanEntries), true)
+		return
+	end
+	if generation ~= selectionScanGeneration or currentSelection() ~= root then
+		setStatus("Selection changed", "Migration was cancelled because the selected folder changed.")
+		return
+	end
 	if previewRoot ~= root or previewSignature ~= fingerprint then
 		previewSelected()
 		setStatus("Review dry run before migrating", "Preview updated. Read the plan, then click Migrate Selected again to confirm.")
@@ -2643,10 +2660,27 @@ local function applyCachedMappings()
 	local root = currentSelection()
 	local scanEntries: {AssetManifestEntry}? = nil
 	if root then
+		local generation = selectionScanGeneration
 		local scanObjects = instancesIncludingRoot(root)
-		local freshEntries, scanSources = scanAllReferences(root, scanObjects)
+		setStatus("Validating cache preview", "Checking the selected folder in cooperative batches.")
+		local scanOk, freshEntries, scanSources, fingerprint = pcall(function()
+			local entries, sources = scanAllReferences(root, scanObjects, generation)
+			local signature = previewFingerprint(root, scanObjects, entries, sources, generation)
+			return entries, sources, signature
+		end)
+		if not scanOk then
+			if freshEntries == SCAN_CANCELLED then
+				setStatus("Selection changed", "Cache application was cancelled because the selected folder changed.")
+				return
+			end
+			setStatus("Validation failed", tostring(freshEntries), true)
+			return
+		end
+		if generation ~= selectionScanGeneration or currentSelection() ~= root then
+			setStatus("Selection changed", "Cache application was cancelled because the selected folder changed.")
+			return
+		end
 		scanEntries = freshEntries
-		local fingerprint = previewFingerprint(root, scanObjects, freshEntries, scanSources)
 		if previewRoot ~= root or previewSignature ~= fingerprint then
 			previewSelected()
 			setStatus("Review dry run before applying cache", "Preview updated. Read the plan, then click Apply Cache again to confirm.")
