@@ -2580,10 +2580,17 @@ end
 local function applyCachedMappings()
 	if busy then return end
 	local root = currentSelection()
-	if root and (previewRoot ~= root or previewSignature ~= previewFingerprint(root)) then
-		previewSelected()
-		setStatus("Review dry run before applying cache", "Preview updated. Read the plan, then click Apply Cache again to confirm.")
-		return
+	local scanEntries: {AssetManifestEntry}? = nil
+	if root then
+		local scanObjects = instancesIncludingRoot(root)
+		local freshEntries, scanSources = scanAllReferences(root, scanObjects)
+		scanEntries = freshEntries
+		local fingerprint = previewFingerprint(root, scanObjects, freshEntries, scanSources)
+		if previewRoot ~= root or previewSignature ~= fingerprint then
+			previewSelected()
+			setStatus("Review dry run before applying cache", "Preview updated. Read the plan, then click Apply Cache again to confirm.")
+			return
+		end
 	end
 	previewSignature = nil
 	if not root then
@@ -2604,7 +2611,7 @@ local function applyCachedMappings()
 			continue
 		end
 
-		local manifest = makeManifest(root, assetType)
+		local manifest = makeManifest(root, assetType, scanEntries)
 		local ids = uniqueIds(manifest)
 		local mapping: Mapping = {}
 
