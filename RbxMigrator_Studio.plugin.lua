@@ -1160,7 +1160,7 @@ local function scanScriptReferencesRaw(root: Instance, objects: {Instance}?): ({
 		-- length × reference count)). Index newline positions once, then binary
 		-- search them for each reference.
 		local newlinePositions = {}
-		for position in source:gmatch("()\\n") do
+		for position in source:gmatch("()\n") do
 			table.insert(newlinePositions, position)
 		end
 		local function lineAt(position: number): number
@@ -1477,6 +1477,8 @@ local function previewFingerprint(
 		entries = entries or scannedEntries
 		scriptSources = scriptSources or scannedSources
 	end
+	local fingerprintEntries: {AssetManifestEntry} = entries or {}
+	local fingerprintSources: {[Instance]: string} = scriptSources or {}
 	local hash = 5381
 	local function append(text: string)
 		for i = 1, #text do
@@ -1491,13 +1493,13 @@ local function previewFingerprint(
 	for _, assetType in ipairs(ASSET_TYPE_ORDER) do
 		append(assetType .. tostring(enabledAssetTypes[assetType]))
 	end
-	for _, entry in ipairs(entries) do
+	for _, entry in ipairs(fingerprintEntries) do
 		append(entry.path .. ":" .. entry.assetType .. ":" .. entry.assetId)
 	end
 	for _, object in ipairs(objectList) do
 		if object:IsA("LuaSourceContainer") then
 			append(object:GetFullName())
-			append(scriptSources[object] or "[Source inaccessible]")
+			append(fingerprintSources[object] or "[Source inaccessible]")
 		end
 	end
 	return tostring(hash)
