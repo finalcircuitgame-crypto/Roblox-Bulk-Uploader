@@ -1078,7 +1078,7 @@ local function maskLuaComments(source: string): string
 			end
 
 			local fragment = source:sub(begin, i - 1)
-			table.insert(parts, fragment:gsub("[^\n]", " "))
+			table.insert(parts, (fragment:gsub("[^\n]", " ")))
 			copyStart = i
 		else
 			i += 1
@@ -1116,7 +1116,7 @@ local function maskQuotedStrings(source: string): string
 			end
 
 			table.insert(parts, source:sub(copyStart, begin - 1))
-			table.insert(parts, source:sub(begin, i - 1):gsub("[^\n]", " "))
+			table.insert(parts, (source:sub(begin, i - 1):gsub("[^\n]", " ")))
 			copyStart = i
 		else
 			i += 1
