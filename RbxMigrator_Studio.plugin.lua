@@ -904,6 +904,18 @@ local PROPERTY_REGISTRY: {{className: string, property: string, assetType: strin
 	{className = "VideoFrame", property = "Video", assetType = "Video", supported = false},
 }
 
+-- Group descriptors by ClassName so each Instance checks only the properties
+-- relevant to its class, rather than walking the entire registry.
+local PROPERTY_REGISTRY_BY_CLASS: {[string]: typeof(PROPERTY_REGISTRY)} = {}
+for _, descriptor in ipairs(PROPERTY_REGISTRY) do
+	local descriptors = PROPERTY_REGISTRY_BY_CLASS[descriptor.className]
+	if not descriptors then
+		descriptors = {}
+		PROPERTY_REGISTRY_BY_CLASS[descriptor.className] = descriptors
+	end
+	table.insert(descriptors, descriptor)
+end
+
 local function normalizedAssetId(value: any): string?
 	local text = tostring(value or "")
 	local id = text:match("^%s*rbxassetid://(%d+)%s*$")
@@ -918,8 +930,7 @@ end
 local function scanInstanceProperties(root: Instance, objects: {Instance}?): {AssetManifestEntry}
 	local results: {AssetManifestEntry} = {}
 	for _, object in ipairs(objects or instancesIncludingRoot(root)) do
-		for _, descriptor in ipairs(PROPERTY_REGISTRY) do
-			if object.ClassName ~= descriptor.className then continue end
+		for _, descriptor in ipairs(PROPERTY_REGISTRY_BY_CLASS[object.ClassName] or {}) do
 			local ok, value = pcall(function()
 				return (object :: any)[descriptor.property]
 			end)
@@ -1024,14 +1035,20 @@ local function writeScriptSource(object: Instance, newSource: string): (boolean,
 end
 
 local function maskLuaComments(source: string): string
+	-- Copy ordinary source in spans. The previous character-at-a-time table
+	-- builder created one table entry per byte for large ModuleScripts.
 	local parts = {}
+	local copyStart = 1
 	local i = 1
 	local n = #source
+
 	while i <= n do
 		local char = source:sub(i, i)
 		local nextChar = source:sub(i + 1, i + 1)
+
 		if char == "'" or char == '"' then
-			local begin = i
+			-- Quoted strings are preserved; skip over them so "--" inside a
+			-- string literal is never mistaken for a comment.
 			i += 1
 			while i <= n do
 				local current = source:sub(i, i)
@@ -1044,8 +1061,8 @@ local function maskLuaComments(source: string): string
 					i += 1
 				end
 			end
-			table.insert(parts, source:sub(begin, i - 1))
 		elseif char == "-" and nextChar == "-" then
+			table.insert(parts, source:sub(copyStart, i - 1))
 			local begin = i
 			local blockLevel = source:sub(i):match("^%-%-%[(=*)%[")
 			if blockLevel then
@@ -1057,38 +1074,54 @@ local function maskLuaComments(source: string): string
 				local newline = source:find("\n", i, true)
 				i = newline or (n + 1)
 			end
+
 			local fragment = source:sub(begin, i - 1)
-			table.insert(parts, (fragment:gsub("[^\n]", " ")))
+			table.insert(parts, fragment:gsub("[^\n]", " "))
+			copyStart = i
 		else
-			table.insert(parts, char)
 			i += 1
 		end
 	end
+
+	table.insert(parts, source:sub(copyStart))
 	return table.concat(parts)
 end
 
 -- Numeric assignments in quoted strings are documentation, not code.
 -- Keep the character positions unchanged so exact replacements stay safe.
 local function maskQuotedStrings(source: string): string
+	-- Preserve byte positions while replacing whole quoted spans at once.
 	local parts = {}
+	local copyStart = 1
 	local i = 1
-	while i <= #source do
+	local n = #source
+
+	while i <= n do
 		local quote = source:sub(i, i)
 		if quote == "'" or quote == '"' then
 			local begin = i
 			i += 1
-			while i <= #source do
+			while i <= n do
 				local current = source:sub(i, i)
-				if current == "\\" then i += 2
-				elseif current == quote then i += 1; break
-				else i += 1 end
+				if current == "\\" then
+					i += 2
+				elseif current == quote then
+					i += 1
+					break
+				else
+					i += 1
+				end
 			end
-			table.insert(parts, (source:sub(begin, i - 1):gsub("[^\n]", " ")))
+
+			table.insert(parts, source:sub(copyStart, begin - 1))
+			table.insert(parts, source:sub(begin, i - 1):gsub("[^\n]", " "))
+			copyStart = i
 		else
-			table.insert(parts, quote)
 			i += 1
 		end
 	end
+
+	table.insert(parts, source:sub(copyStart))
 	return table.concat(parts)
 end
 
