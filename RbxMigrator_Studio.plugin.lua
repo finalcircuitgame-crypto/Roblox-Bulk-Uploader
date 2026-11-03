@@ -2068,6 +2068,7 @@ end
 ----------------------------------------------------------------
 
 local busy = false
+local migrationPreflight = false
 
 local function setBusy(value: boolean)
 	busy = value
@@ -2428,6 +2429,16 @@ local function migrateSelected()
 		return
 	end
 
+	-- The selection scan yields to Studio. Lock the preflight separately from
+	-- the upload phase so a second click cannot launch another concurrent scan.
+	if migrationPreflight then
+		setStatus(
+			"Validation already running",
+			"Wait for the current preview check to finish before clicking again."
+		)
+		return
+	end
+
 	if RunService:IsRunning() then
 		setStatus(
 			"Stop the playtest first",
@@ -2437,10 +2448,17 @@ local function migrateSelected()
 		return
 	end
 
+	migrationPreflight = true
+
+	local function stopPreflight(title: string, detail: string, isError: boolean?)
+		migrationPreflight = false
+		setStatus(title, detail, isError)
+	end
+
 	local root = currentSelection()
 
 	if not root then
-		setStatus(
+		stopPreflight(
 			"Select one item",
 			"Select exactly one folder/model/Animation/Sound/MeshPart/SpecialMesh/ModuleScript.",
 			true
@@ -2458,23 +2476,48 @@ local function migrateSelected()
 		local signature = previewFingerprint(root, scanObjects, entries, sources, generation)
 		return entries, sources, signature
 	end)
+
 	if not scanOk then
 		if scanEntries == SCAN_CANCELLED then
-			setStatus("Selection changed", "Migration was cancelled because the selected folder changed.")
+			stopPreflight(
+				"Selection changed",
+				"Migration was cancelled because the selected folder changed."
+			)
 			return
 		end
-		setStatus("Validation failed", tostring(scanEntries), true)
+		stopPreflight("Validation failed", tostring(scanEntries), true)
 		return
 	end
+
 	if generation ~= selectionScanGeneration or currentSelection() ~= root then
-		setStatus("Selection changed", "Migration was cancelled because the selected folder changed.")
+		stopPreflight(
+			"Selection changed",
+			"Migration was cancelled because the selected folder changed."
+		)
 		return
 	end
+
 	if previewRoot ~= root or previewSignature ~= fingerprint then
-		previewSelected()
-		setStatus("Review dry run before migrating", "Preview updated. Read the plan, then click Migrate Selected again to confirm.")
+		-- Do not claim the preview refreshed unless previewSelected actually
+		-- completed and committed a fresh signature.
+		local previewOK = previewSelected()
+		migrationPreflight = false
+
+		if previewOK then
+			setStatus(
+				"Review dry run before migrating",
+				"Preview refreshed successfully. Review the report, then click Migrate Selected once to start uploads."
+			)
+		elseif generation ~= selectionScanGeneration or currentSelection() ~= root then
+			setStatus(
+				"Selection changed",
+				"Preview was cancelled because the selected folder changed.",
+				true
+			)
+		end
 		return
 	end
+
 	previewSignature = nil -- approval is single-use
 
 	local selectedTypes = {}
@@ -2486,7 +2529,7 @@ local function migrateSelected()
 	end
 
 	if #selectedTypes == 0 then
-		setStatus(
+		stopPreflight(
 			"Choose an asset type",
 			"Enable Animations, Sounds, Meshes, or any combination.",
 			true
@@ -2498,6 +2541,7 @@ local function migrateSelected()
 	for _, assetType in ipairs(selectedTypes) do
 		enabledTypes[assetType] = true
 	end
+
 	local anyAssets = false
 	for _, entry in ipairs(scanEntries) do
 		if entry.supported and enabledTypes[entry.assetType] then
@@ -2507,7 +2551,7 @@ local function migrateSelected()
 	end
 
 	if not anyAssets then
-		setStatus(
+		stopPreflight(
 			"No matching assets found",
 			"The selection does not contain any enabled asset types.",
 			true
@@ -2515,6 +2559,8 @@ local function migrateSelected()
 		return
 	end
 
+	-- Hand the lock to the regular migration state only after validation.
+	migrationPreflight = false
 	setBusy(true)
 	setProgress(0)
 	widget.Enabled = true
@@ -2578,9 +2624,7 @@ local function migrateSelected()
 						)
 					)
 
-					-- Replaced references are taken from the final pass to avoid double-counting.
 					finalReplaced = retryReplaced
-					-- Successful IDs are cached, so each retry's new mappings are additional uploads.
 					uploadedAcrossAttempts += retryUploaded
 					failed = retryFailed
 				end
@@ -2611,7 +2655,7 @@ local function migrateSelected()
 					then (" after %d automatic retry attempt(s)"):format(totalRetries)
 					else ""
 				local detail = (
-					"%d references replaced â¢ %d new assets uploaded â¢ %d unique assets still failed%s. See the migration report for IDs and errors."
+					"%d references replaced • %d new assets uploaded • %d unique assets still failed%s. See the migration report for IDs and errors."
 				):format(
 					totalReplaced,
 					totalUploaded,
@@ -2624,14 +2668,14 @@ local function migrateSelected()
 					.. " automatic retry attempt(s). Check the migration report for details.")
 			elseif totalRetries > 0 then
 				local detail = (
-					"%d references replaced â¢ %d new unique assets uploaded â¢ all failed assets recovered after %d automatic retry attempt(s)."
+					"%d references replaced • %d new unique assets uploaded • all failed assets recovered after %d automatic retry attempt(s)."
 				):format(totalReplaced, totalUploaded, totalRetries)
 				setStatus("Migration complete after retries", detail)
 				print("[RbxMigrator] " .. detail)
 			else
 				setStatus(
 					"Migration complete",
-					("%d references replaced â¢ %d new unique assets uploaded."):format(
+					("%d references replaced • %d new unique assets uploaded."):format(
 						totalReplaced,
 						totalUploaded
 					)
