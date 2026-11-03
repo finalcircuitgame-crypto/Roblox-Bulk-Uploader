@@ -76,6 +76,8 @@ py test_v3_32.py
 py test_v3_33.py
 py test_v3_34.py
 py test_v3_35.py
+py test_v3_36_setup.py
+py test_v3_37_migration_preflight.py
 ```
 
 The tests are offline regression checks; they do not prove live Roblox or RBXDL downloads will succeed. Test with a small set of assets you are authorized to migrate before running a large batch.
