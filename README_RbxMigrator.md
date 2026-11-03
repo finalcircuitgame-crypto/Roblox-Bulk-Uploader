@@ -1,6 +1,6 @@
-# RbxMigrator v3.36
+# RbxMigrator v3.37
 
-**RbxMigrator** es una herramienta para migrar recursos de Roblox. Esta versión mantiene la descarga basada primero en API y los reintentos limitados para recursos fallidos, y mejora el rendimiento del análisis del complemento de Studio.
+**RbxMigrator** es una herramienta para migrar recursos de Roblox. Esta versión mantiene la descarga basada primero en API y los reintentos limitados para recursos fallidos, mejora el rendimiento del análisis del complemento de Studio y evita análisis de validación de migración simultáneos.
 
 ## Contenido del paquete
 
@@ -79,3 +79,8 @@ py test_v3_35.py
 ```
 
 Estas pruebas comprueban el comportamiento local y no garantizan que las descargas reales de Roblox o RBXDL funcionen. Antes de procesar un lote grande, prueba con unos pocos recursos que tengas autorización para migrar.
+
+
+## Fiabilidad de la validación de migración
+
+El complemento de Studio ahora utiliza un bloqueo independiente durante la validación previa, mientras vuelve a comprobar la selección y la huella de la vista previa. Esto evita que varios clics rápidos inicien análisis simultáneos mientras el complemento cede tiempo a Studio. Los controles de tipos de recursos, caché y vista previa también se bloquean durante esta fase para impedir que cambie el plan aprobado. Si la vista previa está desactualizada, el complemento la actualiza e indica que debes revisar el informe antes de volver a pulsar **Migrate Selected**. Cuando termina la validación, el bloqueo pasa al estado normal de migración y comienzan las cargas.
