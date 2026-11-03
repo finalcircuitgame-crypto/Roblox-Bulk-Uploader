@@ -76,6 +76,8 @@ py test_v3_32.py
 py test_v3_33.py
 py test_v3_34.py
 py test_v3_35.py
+py test_v3_36_setup.py
+py test_v3_37_migration_preflight.py
 ```
 
 Estas pruebas comprueban el comportamiento local y no garantizan que las descargas reales de Roblox o RBXDL funcionen. Antes de procesar un lote grande, prueba con unos pocos recursos que tengas autorización para migrar.
