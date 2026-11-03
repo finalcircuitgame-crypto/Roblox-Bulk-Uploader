@@ -2700,7 +2700,7 @@ end
 ----------------------------------------------------------------
 
 local function applyCachedMappings()
-	if busy then return end
+	if busy or migrationPreflight then return end
 	local root = currentSelection()
 	local scanEntries: {AssetManifestEntry}? = nil
 	if root then
@@ -2790,6 +2790,8 @@ local function applyCachedMappings()
 end
 
 local function clearCache()
+	if busy or migrationPreflight then return end
+
 	mappingCache = {}
 	saveCache(mappingCache)
 
@@ -2838,6 +2840,10 @@ widget:GetPropertyChangedSignal("Enabled"):Connect(function()
 end)
 
 previewUiButton.MouseButton1Click:Connect(function()
+	if migrationPreflight then
+		setStatus("Validation already running", "Wait for the current migration preview check to finish.")
+		return
+	end
 	previewSelected()
 end)
 
@@ -2852,7 +2858,7 @@ applyCacheButton.MouseButton1Click:Connect(applyCachedMappings)
 clearCacheButton.MouseButton1Click:Connect(clearCache)
 
 animationTypeButton.MouseButton1Click:Connect(function()
-	if busy then
+	if busy or migrationPreflight then
 		return
 	end
 
@@ -2862,7 +2868,7 @@ animationTypeButton.MouseButton1Click:Connect(function()
 end)
 
 soundTypeButton.MouseButton1Click:Connect(function()
-	if busy then
+	if busy or migrationPreflight then
 		return
 	end
 
@@ -2872,13 +2878,17 @@ soundTypeButton.MouseButton1Click:Connect(function()
 end)
 
 meshTypeButton.MouseButton1Click:Connect(function()
-	if busy then return end
+	if busy or migrationPreflight then return end
 	enabledAssetTypes.Mesh = not enabledAssetTypes.Mesh
 	updateTypeButtons()
 	updateSelectionPreview()
 end)
 
 forceButton.MouseButton1Click:Connect(function()
+	if busy or migrationPreflight then
+		return
+	end
+
 	forceReupload = not forceReupload
 
 	forceButton.Text = if forceReupload
@@ -2933,6 +2943,10 @@ printReportButton.MouseButton1Click:Connect(function()
 end)
 
 refreshSelectionButton.MouseButton1Click:Connect(function()
+	if migrationPreflight then
+		setStatus("Validation already running", "Wait for the current migration preview check to finish.")
+		return
+	end
 	previewSelected()
 end)
 Selection.SelectionChanged:Connect(function()
