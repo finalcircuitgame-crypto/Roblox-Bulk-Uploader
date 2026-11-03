@@ -1,6 +1,6 @@
-# RbxMigrator v3.36
+# RbxMigrator v3.37
 
-**RbxMigrator** is a Roblox asset migration tool. This release keeps the API-first downloader and bounded failed-asset retries, and improves Studio plugin scan performance.
+**RbxMigrator** is a Roblox asset migration tool. This release keeps the API-first downloader and bounded failed-asset retries, improves Studio plugin scan performance, and prevents overlapping migration preflight scans.
 
 ## Package contents
 
@@ -79,3 +79,8 @@ py test_v3_35.py
 ```
 
 The tests are offline regression checks; they do not prove live Roblox or RBXDL downloads will succeed. Test with a small set of assets you are authorized to migrate before running a large batch.
+
+
+## Migration preflight reliability
+
+The Studio plugin now takes a separate preflight lock while it revalidates the current selection and dry-run fingerprint. This prevents rapid repeated clicks from launching overlapping scans while those scans yield to Studio. Asset-type, cache, and preview controls are also blocked during that short validation phase so the approved preview cannot change underneath the migration check. If the preview is stale, the plugin refreshes it and tells you to review the report before clicking **Migrate Selected** again. Once validation passes, the lock is handed over to the normal migration state and uploads begin.
