@@ -42,7 +42,7 @@ local MAX_WAIT_SECONDS = 20 * 60
 -- POST one localhost request per worker. Workers prepare source in parallel,
 -- then a single reporter sends small batches to the helper.
 local STUDIO_PREP_MAX_WORKERS = 12
-local STUDIO_REPORT_BATCH_SIZE = 8
+local STUDIO_REPORT_BATCH_SIZE = 16
 local HTTP_LIMIT_RETRIES = 6
 local HTTP_LIMIT_RETRY_BASE = 0.25
 -- Failed unique assets are retried separately so successful uploads are not repeated.
@@ -53,7 +53,7 @@ local PORT_SETTING = "TowerAnimationMigrator.Port"
 local LAST_REPORT_SETTING = "TowerAnimationMigrator.LastReport"
 
 -- Roblox caps the Text property at 200,000 characters; keep reports under that.
-local MAX_REPORT_CHARS = 200000
+local MAX_REPORT_CHARS = 180000
 
 local port = plugin:GetSetting(PORT_SETTING)
 
@@ -534,7 +534,14 @@ reportBox.ClearTextOnFocus = false
 reportBox.TextEditable = false
 reportBox.Font = Enum.Font.Code
 reportBox.TextSize = 13
-reportBox.Text = plugin:GetSetting(LAST_REPORT_SETTING) or "No migration has run yet."
+local savedReport = plugin:GetSetting(LAST_REPORT_SETTING)
+if type(savedReport) ~= "string" then
+	savedReport = "No migration has run yet."
+end
+if #savedReport >= MAX_REPORT_CHARS then
+	savedReport = savedReport:sub(1, MAX_REPORT_CHARS - 1)
+end
+reportBox.Text = savedReport
 reportBox.LayoutOrder = 11
 reportBox.Parent = rootFrame
 
@@ -672,15 +679,23 @@ local function updateTypeButtons()
 end
 
 local function setReport(report: string)
-	-- Roblox caps Text at 200,000 characters; truncate large reports and note the cut.
+	-- Keep a generous margin below Roblox's strict 200,000-character Text limit.
 	if #report >= MAX_REPORT_CHARS then
-		local shown = report:sub(1, MAX_REPORT_CHARS - 1)
+		local originalLength = #report
+		local suffix = "\n\n... report truncated (" .. tostring(originalLength)
+			.. " chars total; showing first "
+		local available = math.max(1, MAX_REPORT_CHARS - #suffix - 64)
+		local shown = report:sub(1, available)
 		-- Try to cut at a line boundary so the report stays readable.
 		local lastLine = shown:find("\n[^\n]*$")
-		if lastLine then
-			shown = shown:sub(1, lastLine)
+		if lastLine and lastLine > 1 then
+			shown = shown:sub(1, lastLine - 1)
 		end
-		report = shown .. "\n\n... report truncated (" .. tostring(#report) .. " chars total; showing first " .. tostring(#shown) .. ") ..."
+		report = shown .. suffix .. tostring(#shown) .. ") ..."
+	end
+	-- Final hard guard: Text must remain strictly below the platform limit.
+	if #report >= MAX_REPORT_CHARS then
+		report = report:sub(1, MAX_REPORT_CHARS - 1)
 	end
 	reportBox.Text = report
 	-- Some reports are too large for a plugin setting; don't interrupt scanning.
@@ -2221,6 +2236,8 @@ local function migrateAssetType(
 		local studioSourceSuccesses = 0
 		local studioSourceFallbacks = 0
 		local reportQueue = {}
+		local reportQueueHead = 1
+		local reportQueueTail = 0
 		local reporterFailure: string? = nil
 
 		setStatus(
@@ -2250,12 +2267,13 @@ local function migrateAssetType(
 					studioSourceFallbacks += 1
 				end
 
-				table.insert(reportQueue, {
+				reportQueueTail += 1
+				reportQueue[reportQueueTail] = {
 					assetId = id,
 					success = sourceOk,
 					rbxmx = rbxmx,
 					error = sourceError or "",
-				})
+				}
 
 				preparationFinished += 1
 
@@ -2280,15 +2298,21 @@ local function migrateAssetType(
 
 		local function reporterWorker()
 			while reportedFinished < preparationTotal do
-				if #reportQueue == 0 then
+				if reportQueueHead > reportQueueTail then
 					task.wait(0.03)
 					continue
 				end
 
 				local batch = {}
 
-				while #batch < STUDIO_REPORT_BATCH_SIZE and #reportQueue > 0 do
-					table.insert(batch, table.remove(reportQueue, 1))
+				while #batch < STUDIO_REPORT_BATCH_SIZE
+					and reportQueueHead <= reportQueueTail do
+					local item = reportQueue[reportQueueHead]
+					reportQueue[reportQueueHead] = nil
+					reportQueueHead += 1
+					if item then
+						table.insert(batch, item)
+					end
 				end
 
 				local reportOk, reportError = pcall(function()
