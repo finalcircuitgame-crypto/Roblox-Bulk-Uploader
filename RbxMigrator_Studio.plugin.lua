@@ -1559,14 +1559,27 @@ local function previewFingerprint(
 	for _, assetType in ipairs(ASSET_TYPE_ORDER) do
 		append(assetType .. tostring(enabledAssetTypes[assetType]))
 	end
+	-- GetDescendants() and the scanners are not guaranteed to return entries
+	-- in the same order on every pass. Hash a canonical ordering so an unchanged
+	-- selection produces the same preview signature on the next click.
+	local entryKeys = {}
 	for _, entry in ipairs(fingerprintEntries) do
-		append(entry.path .. ":" .. entry.assetType .. ":" .. entry.assetId)
+		table.insert(entryKeys, entry.path .. ":" .. entry.assetType .. ":" .. entry.assetId)
 	end
-	for _, object in ipairs(objectList) do
+	table.sort(entryKeys)
+	for _, key in ipairs(entryKeys) do
+		append(key)
+	end
+
+	local scriptKeys = {}
+	for object, source in pairs(fingerprintSources) do
 		if object:IsA("LuaSourceContainer") then
-			append(object:GetFullName())
-			append(fingerprintSources[object] or "[Source inaccessible]")
+			table.insert(scriptKeys, object:GetFullName() .. "\n" .. (source or "[Source inaccessible]"))
 		end
+	end
+	table.sort(scriptKeys)
+	for _, key in ipairs(scriptKeys) do
+		append(key)
 	end
 	return tostring(hash)
 end
