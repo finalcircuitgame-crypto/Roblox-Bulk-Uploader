@@ -25,7 +25,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 
-APP_TITLE = "RbxMigrator v3.37 — migration preflight lock"
+APP_TITLE = "RbxMigrator v3.38 — parallel uploads and report limit"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 
@@ -39,6 +39,16 @@ RBXDL_DOWNLOAD_URL = RBXDL_BASE_URL + "/download/asset"
 REQUEST_TIMEOUT = 90
 OPERATION_TIMEOUT = 180
 POLL_DELAY = 0.75
+# Bounded concurrency for Open Cloud asset uploads. Keep this conservative to
+# improve throughput without overwhelming Roblox's upload/operation endpoints.
+try:
+    MIGRATION_UPLOAD_WORKERS = max(
+        1,
+        min(6, int(os.environ.get("TM_MIGRATION_UPLOAD_WORKERS", "4"))),
+    )
+except Exception:
+    MIGRATION_UPLOAD_WORKERS = 4
+
 RBXDL_MIN_DOWNLOAD_INTERVAL = 8.5
 RBXDL_RATE_LIMIT_RETRY_PADDING = 0.75
 MAX_FILE_BYTES = 20 * 1024 * 1024
@@ -5587,19 +5597,17 @@ class MigratorApp(tk.Tk):
                     portal.close()
 
         # ----------------------------------------------------
-        # Pass 3: upload all successfully prepared files.
-        # ----------------------------------------------------
-
+        # Pass 3: upload successfully prepared files concurrently.
+        #
+        # Each asset has its own Open Cloud create + operation-poll lifecycle.
+        # Running a small bounded pool overlaps Roblox processing time instead
+        # of waiting for every asset to finish before starting the next one.
         completed = 0
+        upload_items = []
 
         for old_id, entry in unique.items():
-            name = suggested_animation_name(
-                entry
-            )
-
             if old_id not in prepared_files:
                 completed += 1
-
                 self.update_job(
                     job_id,
                     completed=completed,
@@ -5607,71 +5615,75 @@ class MigratorApp(tk.Tk):
                     failed=len(errors),
                     mapping=dict(mapping),
                     errors=dict(errors),
-                    message=(
-                        f"Processed {completed}/{len(unique)}"
-                    ),
+                    message=f"Processed {completed}/{len(unique)}",
                 )
                 continue
 
-            file_path = prepared_files[old_id]
+            upload_items.append(
+                (old_id, entry, prepared_files[old_id])
+            )
 
-            try:
-                if file_path.stat().st_size > MAX_FILE_BYTES:
-                    raise RuntimeError(
-                        "Prepared animation exceeds Roblox's 20 MB upload limit."
-                    )
-
-                self.update_job(
-                    job_id,
-                    state="uploading",
-                    message=(
-                        f"Uploading {name} "
-                        f"(source: {fetch_sources.get(old_id, 'unknown')})"
-                    ),
+        def upload_one(entry, file_path):
+            if file_path.stat().st_size > MAX_FILE_BYTES:
+                raise RuntimeError(
+                    "Prepared animation exceeds Roblox's 20 MB upload limit."
                 )
 
-                operation = create_animation(
-                    config["api_key"],
-                    file_path,
-                    name,
-                    config["creator_type"],
-                    config["creator_id"],
-                    config["description"],
-                )
+            operation = create_animation(
+                config["api_key"],
+                file_path,
+                suggested_animation_name(entry),
+                config["creator_type"],
+                config["creator_id"],
+                config["description"],
+            )
+            return wait_for_operation(
+                config["api_key"],
+                operation,
+            )
 
-                new_id = wait_for_operation(
-                    config["api_key"],
-                    operation,
-                )
-
-                mapping[old_id] = new_id
-
-                # If a previous fetch-stage error was set but we ultimately
-                # migrated this asset, do not count it as failed.
-                errors.pop(
-                    old_id,
-                    None,
-                )
-
-            except Exception as exc:
-                errors[old_id] = (
-                    f"Upload failed after fetching via "
-                    f"{fetch_sources.get(old_id, 'unknown')}: {exc}"
-                )
-
-            completed += 1
-
+        if upload_items:
+            worker_count = min(
+                MIGRATION_UPLOAD_WORKERS,
+                len(upload_items),
+            )
             self.update_job(
                 job_id,
-                completed=completed,
-                migrated=len(mapping),
-                failed=len(errors),
-                mapping=dict(mapping),
-                errors=dict(errors),
+                state="uploading",
                 message=(
-                    f"Processed {completed}/{len(unique)}"
+                    f"Uploading {len(upload_items)} prepared asset(s) "
+                    f"with {worker_count} worker(s)..."
                 ),
             )
+
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_to_asset = {
+                    executor.submit(upload_one, entry, file_path): old_id
+                    for old_id, entry, file_path in upload_items
+                }
+
+                for future in as_completed(future_to_asset):
+                    old_id = future_to_asset[future]
+
+                    try:
+                        mapping[old_id] = future.result()
+                        errors.pop(old_id, None)
+                    except Exception as exc:
+                        errors[old_id] = (
+                            f"Upload failed after fetching via "
+                            f"{fetch_sources.get(old_id, 'unknown')}: {exc}"
+                        )
+
+                    completed += 1
+                    self.update_job(
+                        job_id,
+                        completed=completed,
+                        migrated=len(mapping),
+                        failed=len(errors),
+                        mapping=dict(mapping),
+                        errors=dict(errors),
+                        message=f"Processed {completed}/{len(unique)}",
+                    )
 
         with self.source_cache_lock:
             for old_id in unique.keys():
