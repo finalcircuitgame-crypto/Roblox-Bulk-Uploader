@@ -51,7 +51,7 @@ def test_preview_and_asset_type_controls_cannot_race_preflight():
 
 
 def test_dashboard_version_matches_plugin_release():
-    assert 'APP_TITLE = "RbxMigrator v3.37 — migration preflight lock"' in CORE
+    assert 'APP_TITLE = "RbxMigrator v3.38 — parallel uploads and report limit"' in CORE
 
 
 if __name__ == "__main__":
